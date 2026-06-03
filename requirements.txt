@@ -1,0 +1,6 @@
+torch
+streamlit
+pandas
+matplotlib
+scikit-learn
+tqdm

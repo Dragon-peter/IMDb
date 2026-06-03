@@ -1,0 +1,8 @@
+{
+  "accuracy": 0.8412,
+  "precision": 0.8781028368794326,
+  "recall": 0.7924,
+  "f1": 0.8330529857022708,
+  "test_size": 25000,
+  "best_val_accuracy": 0.8468
+}

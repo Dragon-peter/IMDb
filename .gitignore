@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+
+# Local dataset cache and manifests
+data/raw/
+data/processed/
+
+# Streamlit runtime caches
+.streamlit/secrets.toml
