@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 from .config import ARTIFACTS_DIR, MODEL_DIR, TrainConfig, ensure_directories
 from .data import SentimentDataset, Vocabulary, build_vocabulary, load_examples
-from .metrics import plot_training_curves
+from .metrics import plot_training_curves, search_best_threshold
 from .model import BiLSTMSentimentClassifier
 
 
@@ -51,12 +51,15 @@ def run_epoch(
     criterion: nn.Module,
     device: torch.device,
     optimizer: torch.optim.Optimizer | None = None,
-) -> tuple[float, float]:
+    collect_outputs: bool = False,
+) -> tuple[float, float] | tuple[float, float, list[int], list[float]]:
     is_train = optimizer is not None
     model.train(is_train)
     total_loss = 0.0
     total_correct = 0
     total_count = 0
+    labels_out: list[int] = []
+    probabilities_out: list[float] = []
 
     iterator = tqdm(loader, desc="train" if is_train else "eval", leave=False)
     for batch in iterator:
@@ -74,12 +77,20 @@ def run_epoch(
                 loss.backward()
                 optimizer.step()
 
-        predictions = (torch.sigmoid(logits) >= 0.5).float()
+        batch_probabilities = torch.sigmoid(logits)
+        predictions = (batch_probabilities >= 0.5).float()
         total_loss += loss.item() * labels.size(0)
         total_correct += int((predictions == labels).sum().item())
         total_count += labels.size(0)
+        if collect_outputs:
+            labels_out.extend(labels.detach().cpu().numpy().astype(int).tolist())
+            probabilities_out.extend(batch_probabilities.detach().cpu().numpy().tolist())
 
-    return total_loss / max(total_count, 1), total_correct / max(total_count, 1)
+    epoch_loss = total_loss / max(total_count, 1)
+    epoch_accuracy = total_correct / max(total_count, 1)
+    if collect_outputs:
+        return epoch_loss, epoch_accuracy, labels_out, probabilities_out
+    return epoch_loss, epoch_accuracy
 
 
 def save_checkpoint(
@@ -88,6 +99,8 @@ def save_checkpoint(
     config: TrainConfig,
     history: dict[str, list[float]],
     best_val_accuracy: float,
+    decision_threshold: float,
+    threshold_metric: float,
     output_path: Path,
 ) -> None:
     payload = {
@@ -96,6 +109,8 @@ def save_checkpoint(
         "config": asdict(config),
         "history": history,
         "best_val_accuracy": best_val_accuracy,
+        "decision_threshold": decision_threshold,
+        "best_val_f1": threshold_metric,
     }
     torch.save(payload, output_path)
 
@@ -144,31 +159,54 @@ def train_model(
         "val_loss": [],
         "train_accuracy": [],
         "val_accuracy": [],
+        "val_f1": [],
+        "val_threshold": [],
     }
     best_val_accuracy = 0.0
+    best_threshold = 0.5
     epochs_without_improvement = 0
     best_path = MODEL_DIR / "best.pt"
     save_training_metadata(config, ARTIFACTS_DIR / "train_config.json")
 
     for epoch in range(1, config.epochs + 1):
         train_loss, train_accuracy = run_epoch(model, train_loader, criterion, device, optimizer)
-        val_loss, val_accuracy = run_epoch(model, val_loader, criterion, device)
+        val_loss, val_accuracy, val_labels, val_probabilities = run_epoch(
+            model,
+            val_loader,
+            criterion,
+            device,
+            collect_outputs=True,
+        )
+        threshold_summary = search_best_threshold(np.asarray(val_probabilities), val_labels)
 
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)
         history["train_accuracy"].append(train_accuracy)
         history["val_accuracy"].append(val_accuracy)
+        history["val_f1"].append(threshold_summary["f1"])
+        history["val_threshold"].append(threshold_summary["threshold"])
 
         print(
             f"Epoch {epoch}/{config.epochs} | "
             f"train_loss={train_loss:.4f} train_acc={train_accuracy:.4f} | "
-            f"val_loss={val_loss:.4f} val_acc={val_accuracy:.4f}"
+            f"val_loss={val_loss:.4f} val_acc={val_accuracy:.4f} "
+            f"val_f1={threshold_summary['f1']:.4f} threshold={threshold_summary['threshold']:.2f}"
         )
 
         if val_accuracy > best_val_accuracy:
             best_val_accuracy = val_accuracy
+            best_threshold = threshold_summary["threshold"]
             epochs_without_improvement = 0
-            save_checkpoint(model, vocab, config, history, best_val_accuracy, best_path)
+            save_checkpoint(
+                model,
+                vocab,
+                config,
+                history,
+                best_val_accuracy,
+                best_threshold,
+                threshold_summary["f1"],
+                best_path,
+            )
             plot_training_curves(history, ARTIFACTS_DIR)
         else:
             epochs_without_improvement += 1
@@ -184,6 +222,7 @@ def train_model(
         "train_size": len(train_examples),
         "val_size": len(val_examples),
         "best_val_accuracy": best_val_accuracy,
+        "decision_threshold": best_threshold,
         "history": history,
         "checkpoint_path": str(best_path),
     }

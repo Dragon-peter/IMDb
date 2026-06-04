@@ -100,7 +100,11 @@ def ensure_split_manifest(seed: int, val_ratio: float) -> Path:
     ensure_directories()
     manifest_path = _manifest_path()
     if manifest_path.exists():
-        return manifest_path
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        same_seed = int(payload.get("seed", seed)) == seed
+        same_ratio = float(payload.get("val_ratio", val_ratio)) == val_ratio
+        if same_seed and same_ratio:
+            return manifest_path
 
     if not IMDB_EXTRACTED_DIR.exists():
         raise FileNotFoundError(

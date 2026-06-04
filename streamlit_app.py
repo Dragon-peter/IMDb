@@ -8,7 +8,7 @@ import pandas as pd
 import streamlit as st
 
 from src.config import ARTIFACTS_DIR, MODEL_DIR, TrainConfig
-from src.inference import predict_texts, prediction_to_row, warning_for_text
+from src.inference import load_checkpoint, predict_texts, prediction_to_row, validate_text_for_prediction
 
 
 st.set_page_config(page_title="IMDb 情感分析系统", page_icon="🎬", layout="wide")
@@ -24,6 +24,19 @@ EXAMPLES = {
 def init_history() -> None:
     if "prediction_history" not in st.session_state:
         st.session_state.prediction_history = []
+
+
+@st.cache_resource
+def get_runtime_settings() -> dict:
+    checkpoint_path = MODEL_DIR / "best.pt"
+    if checkpoint_path.exists():
+        _, _, config, _, payload = load_checkpoint(checkpoint_path)
+        return {
+            "max_length": config.max_length,
+            "decision_threshold": float(payload.get("decision_threshold", 0.5)),
+        }
+    fallback_config = TrainConfig()
+    return {"max_length": fallback_config.max_length, "decision_threshold": 0.5}
 
 
 def source_label(source: str) -> str:
@@ -61,7 +74,7 @@ def build_display_frame(rows: list[dict]) -> pd.DataFrame:
 
     if "影评内容" in frame.columns:
         frame["影评内容"] = frame["影评内容"].map(
-            lambda text: text if len(text) <= 120 else f"{text[:117]}..."
+            lambda text: text if len(text) <= 220 else f"{text[:217]}..."
         )
 
     preferred_columns = [
@@ -114,6 +127,7 @@ def render_overview() -> None:
         `positive` 或 `negative`。网页界面为中文说明，便于课程设计演示，但模型训练语料是英文影评。
         """
     )
+    st.warning("系统仅支持英文影评输入。中文或英文占比过低的文本将被直接拦截，不再给出误导性的分类结果。")
 
     col1, col2, col3 = st.columns(3)
     col1.metric("数据集", "IMDb aclImdb v1.0")
@@ -130,35 +144,42 @@ def render_overview() -> None:
     )
 
 
+def render_validation_messages(validation) -> None:
+    for message in validation.errors:
+        st.error(message)
+    for message in validation.warnings:
+        st.warning(message)
+
+
+def render_probability_details(result) -> None:
+    detail_col1, detail_col2 = st.columns(2)
+    detail_col1.metric("正面概率", f"{result.positive_probability:.2%}")
+    detail_col2.metric("负面概率", f"{result.negative_probability:.2%}")
+    st.progress(int(round(result.positive_probability * 100)), text=f"正面倾向 {result.positive_probability:.2%}")
+    st.progress(int(round(result.negative_probability * 100)), text=f"负面倾向 {result.negative_probability:.2%}")
+    st.caption(f"当前模型采用的分类阈值：{result.decision_threshold:.2f}")
+
+
 def render_single_prediction() -> None:
     st.header("单条预测")
+    runtime = get_runtime_settings()
     selected = st.selectbox("快速填充示例", ["自定义输入", *EXAMPLES.keys()])
     default_text = "" if selected == "自定义输入" else EXAMPLES[selected]
     text = st.text_area("请输入英文影评", value=default_text, height=180, placeholder="type an english movie review here...")
 
     if st.button("开始预测", type="primary"):
-        warnings = warning_for_text(text, TrainConfig().max_length)
-        for message in warnings:
-            if "输入为空" in message:
-                st.error(message)
-            else:
-                st.warning(message)
-        if not text.strip():
+        validation = validate_text_for_prediction(text, runtime["max_length"])
+        render_validation_messages(validation)
+        if not validation.is_valid:
             return
         result = predict_texts([text])[0]
         append_history("single_text", [result])
         sentiment_cn = "正面" if result.label == "positive" else "负面"
-        probability = (
-            result.positive_probability if result.label == "positive" else result.negative_probability
-        )
 
         col1, col2 = st.columns(2)
         col1.metric("预测类别", f"{sentiment_cn} ({result.label})")
-        col2.metric("置信度", f"{probability:.2%}")
-
-        detail_col1, detail_col2 = st.columns(2)
-        detail_col1.metric("正面概率", f"{result.positive_probability:.2%}")
-        detail_col2.metric("负面概率", f"{result.negative_probability:.2%}")
+        col2.metric("置信度", f"{result.label_confidence:.2%}")
+        render_probability_details(result)
 
         explanation = (
             "模型判断该评论整体倾向积极，通常意味着文本中包含更多正向评价词。"
@@ -171,6 +192,7 @@ def render_single_prediction() -> None:
 
 def render_batch_prediction() -> None:
     st.header("批量预测")
+    runtime = get_runtime_settings()
     st.caption("支持 CSV 或 TXT。CSV 必须包含 text 列；TXT 每行一条英文影评。也支持直接粘贴多行文本。")
     pasted_texts = st.text_area(
         "直接粘贴多行英文影评",
@@ -182,7 +204,7 @@ def render_batch_prediction() -> None:
         if not lines:
             st.error("请至少输入一行英文影评。")
         else:
-            _render_batch_results(lines, source="multiline_text")
+            _render_batch_results(lines, source="multiline_text", max_length=runtime["max_length"])
 
     st.divider()
     uploaded = st.file_uploader("上传批量预测文件", type=["csv", "txt"])
@@ -207,19 +229,42 @@ def render_batch_prediction() -> None:
         return
 
     if st.button("执行批量预测"):
-        _render_batch_results(texts, source=f"file:{uploaded.name}")
+        _render_batch_results(texts, source=f"file:{uploaded.name}", max_length=runtime["max_length"])
     render_history()
 
 
-def _render_batch_results(texts: list[str], source: str) -> None:
+def _render_batch_results(texts: list[str], source: str, max_length: int) -> None:
+    valid_payloads: list[tuple[int, str]] = []
+    invalid_rows: list[dict] = []
     for index, text in enumerate(texts, start=1):
-        for message in warning_for_text(text, TrainConfig().max_length):
-            if "输入为空" not in message:
-                st.warning(f"第 {index} 条：{message}")
-    results = predict_texts(texts)
+        validation = validate_text_for_prediction(text, max_length)
+        for message in validation.warnings:
+            st.warning(f"第 {index} 条：{message}")
+        if validation.is_valid:
+            valid_payloads.append((index, text))
+        else:
+            invalid_rows.append(
+                {
+                    "序号": index,
+                    "影评内容": text,
+                    "状态": "未预测",
+                    "原因": " | ".join(validation.errors),
+                    "英文占比": f"{validation.english_ratio:.2%}",
+                }
+            )
+
+    if invalid_rows:
+        st.subheader("被拦截的输入")
+        st.dataframe(pd.DataFrame(invalid_rows), use_container_width=True)
+
+    if not valid_payloads:
+        st.info("当前批次没有通过校验的英文影评，因此未执行预测。")
+        return
+
+    results = predict_texts([text for _, text in valid_payloads])
     append_history(source, results)
     result_frame = pd.DataFrame([prediction_to_row(result) for result in results])
-    result_frame.insert(0, "line_no", list(range(1, len(result_frame) + 1)))
+    result_frame.insert(0, "line_no", [index for index, _ in valid_payloads])
     result_frame.insert(3, "sentiment_cn", ["正面" if row == "positive" else "负面" for row in result_frame["label"]])
 
     display_frame = result_frame.rename(
@@ -233,11 +278,13 @@ def _render_batch_results(texts: list[str], source: str) -> None:
             "negative_probability": "负面概率",
             "truncated": "是否截断",
             "english_ratio": "英文占比",
+            "decision_threshold": "分类阈值",
         }
     ).copy()
-    for column in ("最终类别置信度", "正面概率", "负面概率", "英文占比"):
+    for column in ("最终类别置信度", "正面概率", "负面概率", "英文占比", "分类阈值"):
         display_frame[column] = display_frame[column].map(lambda value: f"{float(value):.2%}")
 
+    st.subheader("通过校验的预测结果")
     st.dataframe(display_frame, use_container_width=True)
     csv_bytes = result_frame.to_csv(index=False).encode("utf-8")
     st.download_button("下载预测结果 CSV", data=csv_bytes, file_name="batch_predictions.csv", mime="text/csv")
@@ -260,6 +307,10 @@ def render_model_metrics() -> None:
     col2.metric("Precision", f"{metrics['precision']:.2%}")
     col3.metric("Recall", f"{metrics['recall']:.2%}")
     col4.metric("F1", f"{metrics['f1']:.2%}")
+    st.caption(
+        f"测试集规模：{int(metrics['test_size'])} 条，验证集最优阈值：{float(metrics.get('decision_threshold', 0.5)):.2f}，"
+        f"最佳验证准确率：{float(metrics.get('best_val_accuracy', 0.0)):.2%}"
+    )
 
     for image_name, title in (
         ("confusion_matrix.png", "混淆矩阵"),
@@ -280,11 +331,30 @@ def render_examples_page() -> None:
     st.table(pd.DataFrame(rows))
 
 
+def render_case_analysis_page() -> None:
+    st.header("案例分析")
+    misclassified_path = ARTIFACTS_DIR / "misclassified_examples.csv"
+    uncertain_path = ARTIFACTS_DIR / "uncertain_examples.csv"
+    if misclassified_path.exists():
+        st.subheader("高置信误判案例")
+        misclassified = pd.read_csv(misclassified_path).head(20)
+        st.dataframe(misclassified, use_container_width=True)
+    else:
+        st.info("尚未生成误判案例文件，请先运行 evaluate.py。")
+
+    if uncertain_path.exists():
+        st.subheader("低置信度样本")
+        uncertain = pd.read_csv(uncertain_path).head(20)
+        st.dataframe(uncertain, use_container_width=True)
+    else:
+        st.info("尚未生成低置信度样本文件，请先运行 evaluate.py。")
+
+
 def main() -> None:
     init_history()
     page = st.sidebar.radio(
         "页面导航",
-        ["项目说明", "单条预测", "批量预测", "模型效果", "示例案例"],
+        ["项目说明", "单条预测", "批量预测", "模型效果", "案例分析", "示例案例"],
     )
     if page == "项目说明":
         render_overview()
@@ -294,6 +364,8 @@ def main() -> None:
         render_batch_prediction()
     elif page == "模型效果":
         render_model_metrics()
+    elif page == "案例分析":
+        render_case_analysis_page()
     else:
         render_examples_page()
 

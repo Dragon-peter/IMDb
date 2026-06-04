@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.config import ARTIFACTS_DIR, TrainConfig
-from src.inference import predict_texts, prediction_to_row, warning_for_text
+from src.inference import predict_texts, prediction_to_row, validate_text_for_prediction
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,8 +37,10 @@ def _load_batch_texts(file_path: Path) -> list[str]:
 def _print_text_warnings(texts: list[str]) -> None:
     max_length = TrainConfig().max_length
     for index, text in enumerate(texts, start=1):
-        warnings = warning_for_text(text, max_length)
-        for message in warnings:
+        validation = validate_text_for_prediction(text, max_length)
+        for message in validation.errors:
+            print(f"[error][{index}] {message}")
+        for message in validation.warnings:
             print(f"[warning][{index}] {message}")
 
 
@@ -48,9 +50,13 @@ def main() -> None:
         raise ValueError("请使用 --text 或 --input 提供待预测内容。")
 
     if args.text:
-        warnings = warning_for_text(args.text, TrainConfig().max_length)
-        for message in warnings:
+        validation = validate_text_for_prediction(args.text, TrainConfig().max_length)
+        for message in validation.errors:
+            print(f"[error] {message}")
+        for message in validation.warnings:
             print(f"[warning] {message}")
+        if not validation.is_valid:
+            raise ValueError("输入未通过校验，未执行预测。")
         result = predict_texts([args.text])[0]
         print(prediction_to_row(result))
         return
@@ -58,8 +64,28 @@ def main() -> None:
     input_path = Path(args.input)
     texts = _load_batch_texts(input_path)
     _print_text_warnings(texts)
-    results = predict_texts(texts)
-    frame = pd.DataFrame([prediction_to_row(result) for result in results])
+    valid_texts = []
+    invalid_rows = []
+    for index, text in enumerate(texts, start=1):
+        validation = validate_text_for_prediction(text, TrainConfig().max_length)
+        if validation.is_valid:
+            valid_texts.append(text)
+        else:
+            invalid_rows.append(
+                {
+                    "line_no": index,
+                    "text": text,
+                    "status": "invalid",
+                    "reason": " | ".join(validation.errors),
+                }
+            )
+    results = predict_texts(valid_texts)
+    rows = [prediction_to_row(result) for result in results]
+    frame = pd.DataFrame(rows)
+    if not frame.empty:
+        frame.insert(0, "status", "predicted")
+    if invalid_rows:
+        frame = pd.concat([frame, pd.DataFrame(invalid_rows)], ignore_index=True, sort=False)
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_csv(output_path, index=False)

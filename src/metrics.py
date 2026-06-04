@@ -75,3 +75,35 @@ def plot_confusion_matrix(labels: list[int], predictions: list[int], output_path
 
 def probabilities_to_labels(probabilities: np.ndarray, threshold: float = 0.5) -> list[int]:
     return [int(value >= threshold) for value in probabilities]
+
+
+def search_best_threshold(
+    probabilities: np.ndarray,
+    labels: list[int],
+    metric: str = "f1",
+    thresholds: np.ndarray | None = None,
+) -> dict[str, float]:
+    if thresholds is None:
+        thresholds = np.arange(0.30, 0.701, 0.02)
+
+    labels_array = np.asarray(labels)
+    best_threshold = 0.5
+    best_metrics = compute_classification_metrics(labels, probabilities_to_labels(probabilities, threshold=0.5))
+    best_score = best_metrics[metric]
+
+    for threshold in thresholds:
+        predictions = probabilities_to_labels(probabilities, threshold=float(threshold))
+        current_metrics = compute_classification_metrics(labels, predictions)
+        current_score = current_metrics[metric]
+        if current_score > best_score:
+            best_threshold = float(threshold)
+            best_metrics = current_metrics
+            best_score = current_score
+
+    return {
+        "threshold": float(best_threshold),
+        "accuracy": float(best_metrics["accuracy"]),
+        "precision": float(best_metrics["precision"]),
+        "recall": float(best_metrics["recall"]),
+        "f1": float(best_metrics["f1"]),
+    }

@@ -26,7 +26,7 @@ class TrainConfig:
     hidden_dim: int = 128
     num_layers: int = 1
     dropout: float = 0.3
-    batch_size: int = 64
+    batch_size: int = 256
     epochs: int = 8
     learning_rate: float = 1e-3
     patience: int = 2

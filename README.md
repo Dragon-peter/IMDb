@@ -2,6 +2,12 @@
 
 本项目基于 Stanford 发布的 IMDb Large Movie Review Dataset (`aclImdb v1.0`) 实现二分类情感分析，模型采用 `BiLSTM`，界面采用 `Streamlit`，演示口径为“中文界面 + 英文影评输入”。
 
+当前版本额外包含：
+
+- 英文输入硬校验，避免中文或空输入产生误导性结果
+- 基于验证集的决策阈值优化，不再固定使用 `0.5`
+- 历史记录、批量预测、正负概率详情、误判案例展示
+
 ## 技术栈
 
 - Python 3.11
@@ -51,7 +57,7 @@ python scripts/download_imdb.py
 2. 训练模型
 
 ```bash
-python train.py
+python train.py --batch-size 256
 ```
 
 3. 评估模型并生成图表
@@ -99,8 +105,11 @@ the plot is dull and the acting is terrible
 - `artifacts/loss_curve.png`
 - `artifacts/accuracy_curve.png`
 - `artifacts/sample_predictions.csv`
+- `artifacts/misclassified_examples.csv`
+- `artifacts/uncertain_examples.csv`
 
 ## 说明
 
-- 本模型基于 IMDb 英文影评训练，建议输入英文评论。
+- 本模型基于 IMDb 英文影评训练，仅支持英文评论输入。
 - 当输入过长时，系统会自动截断到前 `256` 个 tokens。
+- 训练阶段会根据验证集自动搜索更优的分类阈值，并在推理与评估阶段复用该阈值。

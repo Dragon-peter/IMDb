@@ -15,7 +15,7 @@ from src.trainer import train_model
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train BiLSTM sentiment classifier on IMDb.")
     parser.add_argument("--epochs", type=int, default=8)
-    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--max-train-samples", type=int, default=None)
     parser.add_argument("--max-val-samples", type=int, default=None)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
